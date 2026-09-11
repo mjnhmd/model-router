@@ -104,6 +104,23 @@ def make_monitor(tmp_path):
     return monitor, config
 
 
+def test_codex_monitor_follows_runtime_codex_enabled_switch(tmp_path):
+    config = tmp_path / "codex.toml"
+    original = b'model = "original"\nmodel_provider = "custom"\n'
+    config.write_bytes(original)
+    server = SimpleNamespace(is_alive=lambda: True)
+    monitor = gui._CodexMonitor(
+        gui.CodexSession(config), 8765, "this-instance", server, attach_enabled=None
+    )
+
+    monitor.sync(ready_status(codex_enabled=False))
+    assert config.read_bytes() == original
+    monitor.sync(ready_status(codex_enabled=True))
+    assert 'model = "route-fastest"' in config.read_text()
+    monitor.sync(ready_status(codex_enabled=False))
+    assert config.read_bytes() == original
+
+
 def test_codex_attaches_after_first_configuration_becomes_ready(tmp_path):
     monitor, config = make_monitor(tmp_path)
     original = config.read_bytes()
@@ -509,22 +526,17 @@ def test_missing_config_uses_empty_in_app_config(monkeypatch, tmp_path: Path):
     assert config.services == []
 
 
-def test_gui_reports_leftover_codex_conflict_without_starting_server(monkeypatch, tmp_path: Path):
+def test_gui_conflict_opens_workbench_and_does_not_show_error_window(monkeypatch, tmp_path):
     events = []
-
     class ConflictSession(FakeSession):
         def recover_previous(self):
             raise RuntimeError("Codex 配置已被外部修改")
-
+    server = stub_desktop(monkeypatch, events)
     monkeypatch.setattr(gui, "CodexSession", ConflictSession)
-    monkeypatch.setattr(gui, "_report_error", lambda message: events.append(message))
-    monkeypatch.setattr(gui, "_start_server", lambda *args: events.append("server"))
-
+    monkeypatch.setattr(gui, "_report_error", lambda message: events.append("error-window"))
     gui.run(str(tmp_path / "config.yaml"), 8765, auto_attach=True)
-
-    assert len(events) == 1
-    assert "Codex 配置已被外部修改" in events[0]
-    assert "代理不会启动" in events[0]
+    assert events == ["server", "window", "close", "stop"]
+    assert not server.is_alive()
 
 
 def test_gui_reports_restore_conflict_after_window_closes(monkeypatch, tmp_path: Path):
@@ -542,5 +554,40 @@ def test_gui_reports_restore_conflict_after_window_closes(monkeypatch, tmp_path:
 
     assert events[:3] == ["server", "window", "close"]
     assert not server.is_alive()
-    assert "Codex 配置已被外部修改" in events[-1]
-    assert "备份已保留" in events[-1]
+    assert events == ["server", "window", "close", "stop"]
+
+
+def test_monitor_updates_catalog_when_second_model_changes(tmp_path):
+    monitor, config = make_monitor(tmp_path)
+    first = {'models': [{'slug': 'route-fastest'}, {'slug': 'B/old'}]}
+    second = {'models': [{'slug': 'route-fastest'}, {'slug': 'B/new'}]}
+    try:
+        monitor.sync(ready_status(codex_catalog=first))
+        from model_router.codex_session import tomllib
+        path = Path(tomllib.loads(config.read_text())['model_catalog_json'])
+        assert gui.json.loads(path.read_text()) == first
+        monitor.sync(ready_status(codex_catalog=second))
+        path = Path(tomllib.loads(config.read_text())['model_catalog_json'])
+        assert gui.json.loads(path.read_text()) == second
+    finally:
+        monitor.session.restore()
+
+
+def test_workbench_reconnect_resumes_after_conflict_and_restores_new_baseline(monkeypatch, tmp_path):
+    monitor, config = make_monitor(tmp_path)
+    previous = gui.CodexSession(config)
+    previous.start(8765, 'old-route')
+    previous._release_lock()
+    config.write_text(config.read_text().replace('127.0.0.1:8765', 'external.example:443'))
+    baseline = config.read_bytes()
+    monitor.error = 'external conflict'
+    control = gui._CodexControl(monitor)
+    assert control.get_codex_state()['state'] == 'paused'
+    monkeypatch.setattr(gui, '_read_status', lambda *args: ready_status())
+    try:
+        assert control.reconnect_codex()['state'] == 'active'
+        assert '127.0.0.1:8765' in config.read_text()
+    finally:
+        monitor.stop()
+        monitor.session.restore()
+    assert config.read_bytes() == baseline

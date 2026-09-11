@@ -65,6 +65,33 @@
     })();
     return statusPromise;
   }
+  async function refreshCodexState() {
+    const api = window.pywebview && window.pywebview.api;
+    if (!api || typeof api.get_codex_state !== 'function') return;
+    try { applyCodexState(await api.get_codex_state()); } catch (error) { /* 桌面接口暂不可用时保持现状 */ }
+  }
+  function applyCodexState(state) {
+    const box = $('codex-notice'); if (!box) return;
+    const paused = !!state && state.state === 'paused';
+    box.hidden = !paused;
+    if (paused) {
+      setText('codex-notice-title', 'Codex 接入已暂停');
+      setText('codex-notice-body', state.message || 'Codex 配置与备份已保留。');
+    }
+  }
+  async function reconnectCodex() {
+    const api = window.pywebview && window.pywebview.api;
+    if (!api || typeof api.reconnect_codex !== 'function') { toast('请在桌面 App 中使用重新接入', true); return; }
+    const button = $('codex-reconnect'); button.disabled = true; button.textContent = '正在备份并接入…';
+    try {
+      const state = await api.reconnect_codex();
+      applyCodexState(state);
+      const ok = !!state && state.state === 'active';
+      toast(ok ? '已备份当前配置并重新接入 Codex' : ((state && state.message) || '接入未完成，请重试'), !ok);
+      await refreshStatus();
+    } catch (error) { toast(error.message, true); }
+    finally { button.disabled = false; button.textContent = '备份当前配置并接入'; }
+  }
   function recommendationLabel(data, protocol) {
     const key = data.recommended_models && data.recommended_models[protocol];
     if (!key) return '';
@@ -232,13 +259,15 @@
   $('bench-now').onclick=async()=>{try{await jsonFetch('/v1/bench',{method:'POST'});toast('已开始测速当前选择模型')}catch(e){toast(e.message,true)}};
   $('bench-cancel').onclick=async()=>{try{await jsonFetch('/v1/bench/cancel',{method:'POST'});toast('测速已停止')}catch(e){toast(e.message,true)}};
   $('save-workbench').onclick=saveConfig;
-  $('apply-codex').onclick=()=>{if(!configData.codex)configData.codex={enabled:false,mode:'fastest',models:[]};configData.codex.enabled=true;saveConfig()};
+  $('apply-codex').onclick=saveConfig;
   function formatTokens(v){const n=Number(v||0);return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);}
   function renderLogs(items){$('log-list').innerHTML=items.length?items.map(i=>'<div class="log-row"><span class="log-time">'+esc(i.time)+'</span><span class="log-model">'+esc(i.model)+'</span><span class="log-detail">'+esc(i.endpoint)+'</span><span>'+(i.ok?'<span class="log-ok">成功 '+i.status_code+'</span>':'<span class="log-fail">失败 '+i.status_code+'</span>')+'</span><span class="log-meta">'+Number(i.latency||0).toFixed(2)+'s</span></div>').join(''):'<div class="empty">暂无请求记录</div>';}
   async function refreshLogs(){try{const r=await jsonFetch('/v1/logs?limit=100');renderLogs(r.logs||[]);$('logs-updated').textContent='更新于 '+new Date().toLocaleTimeString();}catch(e){$('logs-updated').textContent='日志离线：'+e.message;$('logs-updated').className='muted status-stale';}}
   function renderStats(d){const total=Number(d.total_requests||0),ok=Number(d.success_requests||0);$('stat-total').textContent=total;$('stat-success').textContent=(total?Math.round(ok*100/total):0)+'%';$('stat-latency').textContent=Number(d.avg_latency||0).toFixed(2)+'s';$('stat-tokens').textContent=formatTokens(Number(d.total_input_tokens||0)+Number(d.total_output_tokens||0));$('stat-token-detail').textContent='输入 '+formatTokens(d.total_input_tokens)+' · 输出 '+formatTokens(d.total_output_tokens);$('stats-updated').textContent='更新于 '+new Date().toLocaleTimeString();}
   async function refreshStats(){try{renderStats(await jsonFetch('/v1/stats'));}catch(e){$('stats-updated').textContent='统计离线：'+e.message;$('stats-updated').className='muted status-stale';}}
   window.refreshStatus=refreshStatus; window.renderDashboard=renderDashboard; window.loadConfig=loadConfig; window.saveConfig=saveConfig; window.switchView=switchView; window.jsonFetch=jsonFetch;
+  $('codex-reconnect').onclick=reconnectCodex;
+  refreshCodexState(); setInterval(refreshCodexState,3000);
   $('refresh-logs').onclick=refreshLogs; setInterval(()=>{if($('logs-view').classList.contains('active'))refreshLogs();if($('stats-view').classList.contains('active'))refreshStats();},3000);
   $('check-update').onclick=async()=>{const button=$('check-update'), result=$('update-result');button.disabled=true;button.textContent='检查中…';try{const data=await jsonFetch('/v1/update');if(data.error){result.textContent=data.error;result.className='muted status-stale';}else if(data.update_available){result.innerHTML='发现新版本 <b>'+esc(data.latest_version)+'</b> · <a href="'+esc(data.release_url)+'" target="_blank" rel="noreferrer">查看 Release</a>';result.className='muted green';}else{result.textContent='当前已是最新版本 '+esc(data.current_version);result.className='muted';}}catch(error){result.textContent=error.message;result.className='muted status-stale';}finally{button.disabled=false;button.textContent='检查更新';}};
   refreshStatus(); loadConfig(); setInterval(()=>refreshStatus(),3000); refreshLogs(); refreshStats();

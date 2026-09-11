@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Config, ServiceSpec, save_config
+from .codex_catalog import build_catalog
 from .router import MAX_BENCH_TARGET_TOKENS, Router
 from .state import RouterState
 from .upstream import UpstreamClient
@@ -268,6 +269,9 @@ def create_app(
                 "instance_id": instance_id,
                 "public_model": router.default_public_model(),
                 "current_model": router.current_model(),
+                "codex_enabled": router.config.codex.enabled,
+                "codex_mode": router.config.codex.mode,
+                "codex_catalog": build_catalog(exposed, router.status_snapshot()),
                 "enabled_count": len(router.enabled),
                 "responses_configured": bool(responses) or bool(exposed),
                 "responses_ready": any(

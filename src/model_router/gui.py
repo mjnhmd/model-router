@@ -89,14 +89,24 @@ def _wait_ready(
 
 
 class _CodexMonitor:
-    def __init__(self, session: CodexSession, port: int, instance_id: str, server: _ServerHandle):
+    def __init__(
+        self,
+        session: CodexSession,
+        port: int,
+        instance_id: str,
+        server: _ServerHandle,
+        attach_enabled: bool | None = True,
+    ):
         self.session = session
         self.port = port
         self.instance_id = instance_id
         self.server = server
+        # None follows the live config switch; bool is used by explicit CLI overrides.
+        self.attach_enabled = attach_enabled
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, name="model-router-codex", daemon=True)
         self.public_model: str | None = None
+        self.catalog: dict | None = None
         self.missed_status = 0
         self.error: str | None = None
         self.on_error: Callable[[], None] | None = None
@@ -112,14 +122,24 @@ class _CodexMonitor:
         else:
             self.missed_status = 0
         configured = alive and status is not None and status.get("responses_configured") is True
+        enabled = self.attach_enabled if self.attach_enabled is not None else (
+            status is not None and status.get("codex_enabled") is True
+        )
         public_model = status.get("public_model") if status is not None else None
-        if self.session.active and (not configured or public_model != self.public_model):
+        catalog = status.get("codex_catalog") if status is not None else None
+        if self.session.active and (not enabled or not configured or public_model != self.public_model
+                                    or catalog != self.catalog):
             self.session.restore()
             self.public_model = None
-        if (not self.session.active and configured and status.get("responses_ready") is True
+            self.catalog = None
+        if (not self.session.active and enabled and configured and status.get("responses_ready") is True
                 and isinstance(public_model, str) and public_model.strip()
                 and not self.stopped.is_set()):
-            self.session.start(port=self.port, public_model=public_model)
+            if catalog is None:
+                self.session.start(port=self.port, public_model=public_model)
+            else:
+                self.session.start(port=self.port, public_model=public_model, catalog=catalog)
+            self.catalog = catalog
             self.public_model = public_model
 
     def _run(self) -> None:
@@ -144,6 +164,46 @@ class _CodexMonitor:
             self.thread.join(timeout=3)
             if self.thread.is_alive():
                 raise RuntimeError("Codex 接管监控未能停止，请退出 Model Router 进程后检查配置")
+
+
+class _CodexControl:
+    """Desktop-only actions; reconnect requires an explicit workbench click."""
+
+    def __init__(self, monitor: _CodexMonitor | None):
+        self._monitor = monitor
+        self._lock = threading.Lock()
+
+    def get_codex_state(self) -> dict:
+        monitor = self._monitor
+        if monitor is None:
+            return {"state": "disabled", "message": "本次启动未启用 Codex 接入。"}
+        if monitor.error:
+            return {"state": "paused", "message": monitor.error}
+        if monitor.session.active:
+            return {"state": "active", "message": "Codex 正在使用 Model Router。"}
+        return {"state": "waiting", "message": "等待本地代理就绪后自动接入。"}
+
+    def reconnect_codex(self) -> dict:
+        with self._lock:
+            monitor = self._monitor
+            if monitor is None or not monitor.error:
+                return self.get_codex_state()
+            try:
+                monitor.stop()
+                # The user explicitly accepts the current file as the new baseline.
+                monitor.session.use_current_as_baseline()
+                monitor.error = None
+                monitor.public_model = None
+                monitor.catalog = None
+                monitor.stopped.clear()
+                monitor.sync(_read_status(monitor.port, monitor.instance_id))
+                monitor.thread = threading.Thread(
+                    target=monitor._run, name="model-router-codex", daemon=True
+                )
+                monitor.start()
+            except Exception as exc:
+                monitor.error = f"Codex 接入仍然失败：{exc}；当前配置与备份已保留。"
+            return self.get_codex_state()
 
 
 def _bind_monitor_errors(window: webview.Window, monitor: _CodexMonitor) -> None:
@@ -173,17 +233,15 @@ def run(
     except Exception as exc:
         _report_error(f"配置无法加载：{exc}")
         return
-    should_attach = app_config.codex.enabled if auto_attach is None else auto_attach
-    session = CodexSession(codex_config) if should_attach else None
+    # The default desktop mode keeps a monitor alive so changes made in the UI
+    # take effect immediately. --no-attach remains a hard opt-out for this run.
+    session = CodexSession(codex_config) if auto_attach is not False else None
+    recovery_error = None
     if session is not None:
         try:
             session.recover_previous()
         except Exception as exc:
-            _report_error(
-                f"Codex 配置未恢复：{exc}\n"
-                "为避免覆盖用户修改，代理不会启动。请人工确认备份后重试。"
-            )
-            return
+            recovery_error = f"{exc}。点击“备份当前配置并接入”会以当前 Codex 配置为准重新接入。"
 
     state_file = str(Path(config_file).with_name("config.state.yaml"))
     instance_id = uuid.uuid4().hex
@@ -201,16 +259,26 @@ def run(
             errors.append(f"本地代理启动失败：端口 {port} 未就绪。请检查配置和端口占用。")
             return
         if session is not None:
-            monitor = _CodexMonitor(session, port, instance_id, server)
+            monitor = _CodexMonitor(
+                session,
+                port,
+                instance_id,
+                server,
+                attach_enabled=auto_attach,
+            )
             try:
-                monitor.sync(status)
-                monitor.start()
+                if recovery_error:
+                    monitor.error = recovery_error
+                else:
+                    monitor.sync(status)
+                    monitor.start()
             except Exception as exc:
                 monitor.stopped.set()
-                monitor.error = f"Codex 配置未切换：{exc}。请检查配置后重启。"
+                monitor.error = f"Codex 接入已暂停：{exc}；请在工作台重新接入。"
         url = f"http://127.0.0.1:{port}/console/"
         window = webview.create_window(
-            "Model Router", url, width=1080, height=720, min_size=(800, 560)
+            "Model Router", url, width=1280, height=820, min_size=(900, 600),
+            js_api=_CodexControl(monitor)
         )
         if monitor is not None and window is not None:
             _bind_monitor_errors(window, monitor)
@@ -223,16 +291,11 @@ def run(
             except Exception as exc:
                 monitor_stopped = False
                 errors.append(str(exc))
-            if monitor.error:
-                errors.append(monitor.error)
         if session is not None and monitor_stopped:
             try:
                 session.restore()
             except Exception as exc:
-                errors.append(
-                    f"Codex 配置未恢复：{exc}\n"
-                    "为避免覆盖用户修改，备份已保留，请人工确认后处理。"
-                )
+                print(f"Codex 接入已暂停：{exc}；当前配置与备份已保留。")
         try:
             server.stop()
         except Exception as exc:

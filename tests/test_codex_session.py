@@ -277,11 +277,18 @@ def test_legacy_recovery_keeps_backup_when_managed_model_is_unknown(tmp_path, ha
         external += '[model_providers.local_router]\nname = "local_router"\n'
     config.write_text(external)
 
-    with pytest.raises(CodexConfigConflictError, match="托管"):
-        CodexSession(config).recover_previous()
+    if has_provider_table:
+        with pytest.raises(CodexConfigConflictError, match="托管"):
+            CodexSession(config).recover_previous()
+    else:
+        assert CodexSession(config).recover_previous()
 
     assert config.read_text() == external
-    assert session.backup_path is not None
+    if has_provider_table:
+        assert session.backup_path is not None
+    else:
+        assert session.backup_path is None
+        assert list(tmp_path.glob("config.toml.model-router.bak.orphan.*"))
 
 
 def test_recovery_restores_managed_model_when_external_tool_removed_provider_table(tmp_path):
@@ -478,3 +485,62 @@ def test_recovery_rejects_corrupt_original_backup(tmp_path: Path):
 
     assert config.read_text(encoding="utf-8").find('model = "route-fastest"') >= 0
     assert session.backup_path.exists()
+
+
+def test_catalog_takeover_restores_previous_catalog_with_external_edits(tmp_path):
+    config = tmp_path / 'config.toml'
+    original = 'model = "old"\nmodel_catalog_json = "/old/catalog.json"\n'
+    config.write_text(original)
+    session = CodexSession(config)
+    catalog = {"models": [{"slug": "A/model"}, {"slug": "B/model"}]}
+    session.start(8765, 'A/model', catalog=catalog)
+    managed = codex_session_module.tomllib.loads(config.read_text())
+    catalog_path = Path(managed['model_catalog_json'])
+    assert json.loads(catalog_path.read_text()) == catalog
+    assert catalog_path.is_absolute()
+    config.write_text('# unrelated edit\n' + config.read_text())
+    session.restore()
+    assert config.read_text().startswith('# unrelated edit\n')
+    assert codex_session_module.tomllib.loads(config.read_text()) == codex_session_module.tomllib.loads(original)
+
+
+def test_catalog_external_pointer_edit_survives_restore(tmp_path):
+    config = tmp_path / 'config.toml'
+    config.write_text('model = "old"\n')
+    session = CodexSession(config)
+    session.start(8765, 'A/model', catalog={"models": [{"slug": "A/model"}]})
+    doc = codex_session_module._parse_config(config.read_bytes())
+    doc['model_catalog_json'] = '/user/new-catalog.json'
+    config.write_text(doc.as_string())
+    session.restore()
+    assert codex_session_module.tomllib.loads(config.read_text())['model_catalog_json'] == '/user/new-catalog.json'
+
+
+def test_restore_after_codex_selects_another_catalog_model(tmp_path):
+    config = tmp_path / 'config.toml'
+    original = 'model = "original"\nmodel_provider = "custom"\n'
+    config.write_text(original)
+    session = CodexSession(config)
+    session.start(8765, 'A/model', catalog={'models': [{'slug': 'A/model'}, {'slug': 'B/model'}]})
+    config.write_text(config.read_text().replace('model = "A/model"', 'model = "B/model"'))
+    session.restore()
+    restored = codex_session_module.tomllib.loads(config.read_text())
+    assert restored == codex_session_module.tomllib.loads(original)
+
+
+def test_explicit_reconnect_archives_old_state_and_preserves_current_config(tmp_path):
+    config = tmp_path / 'config.toml'
+    config.write_text('model = "original"\n')
+    previous = CodexSession(config)
+    previous.start(8765, 'old-route')
+    previous._release_lock()
+    config.write_text(config.read_text().replace('127.0.0.1:8765', 'external.example:443'))
+    current = config.read_bytes()
+    old_backup = previous.backup_path.read_bytes()
+    session = CodexSession(config)
+    session.use_current_as_baseline()
+    assert config.read_bytes() == current
+    assert next(tmp_path.glob('*.bak.orphan.*')).read_bytes() == old_backup
+    session.start(8765, 'new-route')
+    session.restore()
+    assert config.read_bytes() == current

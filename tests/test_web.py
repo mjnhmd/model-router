@@ -89,3 +89,12 @@ def test_speed_sort_puts_measured_models_before_unmeasured_defaults():
     assert "const aBenchmarked=Number(a.last_update)>0" in js
     assert "if(aBenchmarked!==bBenchmarked)" in js
     assert "measured?displayNumber(m.tps,'')" in js
+
+
+def test_workbench_exposes_codex_recovery_notice():
+    html = WEB.read_text(encoding="utf-8")
+    for marker in ('id="codex-notice"', 'id="codex-notice-title"', 'id="codex-notice-body"', 'id="codex-reconnect"', 'Codex 接入已暂停', '备份当前配置并接入'):
+        assert marker in html, marker
+    console = CONSOLE.read_text(encoding="utf-8")
+    for marker in ('get_codex_state', 'reconnect_codex', 'applyCodexState', 'refreshCodexState'):
+        assert marker in console, marker

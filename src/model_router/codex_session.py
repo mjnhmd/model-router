@@ -53,7 +53,7 @@ def _parse_config(raw: bytes) -> TOMLDocument:
 
 
 def _validate_editable_shape(document: TOMLDocument) -> None:
-    for key in ("model", "model_provider"):
+    for key in ("model", "model_provider", "model_catalog_json"):
         if key in document and not isinstance(document[key].unwrap(), str):
             raise ValueError(f"Codex 配置中的 {key} 不是字符串，拒绝覆盖")
 
@@ -65,7 +65,8 @@ def _validate_editable_shape(document: TOMLDocument) -> None:
             raise ValueError("Codex 配置中的 local_router 不是 TOML 表，拒绝覆盖")
 
 
-def _render_managed_config(raw: str, port: int, public_model: str) -> bytes:
+def _render_managed_config(raw: str, port: int, public_model: str,
+                           catalog_path: str | None = None) -> bytes:
     if not isinstance(public_model, str) or not public_model.strip():
         raise ValueError("public_model 不能为空")
     if not 1 <= port <= 65535:
@@ -82,6 +83,9 @@ def _render_managed_config(raw: str, port: int, public_model: str) -> bytes:
         document["model"] = public_model
     else:
         document.add("model", public_model)
+
+    if catalog_path is not None:
+        document["model_catalog_json"] = catalog_path
 
     providers = document.get("model_providers")
     if providers is None:
@@ -168,13 +172,13 @@ class CodexSession:
     def active(self) -> bool:
         return self._active
 
-    def start(self, port: int, public_model: str) -> None:
+    def start(self, port: int, public_model: str, catalog: dict | None = None) -> None:
         if self._active:
             return
 
         self._acquire_lock()
         try:
-            self._write_takeover_locked(port, public_model)
+            self._write_takeover_locked(port, public_model, catalog)
             self._active = True
         except Exception:
             try:
@@ -206,7 +210,7 @@ class CodexSession:
         finally:
             self._release_lock()
 
-    def _write_takeover_locked(self, port: int, public_model: str) -> None:
+    def _write_takeover_locked(self, port: int, public_model: str, catalog: dict | None = None) -> None:
         self._recover_previous_locked(auto_archive_orphan=True)
         self._validate_paths()
 
@@ -216,10 +220,24 @@ class CodexSession:
             stat.S_IMODE(self.config_path.stat().st_mode) if original_exists else 0o600
         )
         original_hash = _sha256(original) if original is not None else _MISSING_HASH
+        catalog_path = None
+        if catalog is not None:
+            if not isinstance(catalog.get("models"), list) or not catalog["models"]:
+                raise ValueError("Codex 模型目录不能为空")
+            data = json.dumps(catalog, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            # Immutable snapshots let a running Codex process keep its catalog.
+            target = self.config_path.parent / f"model-router-catalog-{_sha256(data)}.json"
+            _reject_symlink(target, "模型目录")
+            if _lexists(target) and target.read_bytes() != data:
+                raise CodexConfigConflictError("Codex 模型目录已被外部修改，未覆盖")
+            if not target.exists():
+                _atomic_write(target, data, mode=0o600)
+            catalog_path = str(target.resolve())
         rendered = _render_managed_config(
             original.decode("utf-8") if original is not None else "",
             port,
             public_model,
+            catalog_path,
         )
 
         config_write_attempted = False
@@ -237,6 +255,9 @@ class CodexSession:
                     "model_providers"
                 ]["local_router"],
             }
+            if catalog_path is not None:
+                state["managed_model_catalog_json"] = catalog_path
+                state["managed_catalog_models"] = [model["slug"] for model in catalog["models"]]
             _atomic_write(
                 self.state_path,
                 json.dumps(state, ensure_ascii=False, sort_keys=True).encode("utf-8") + b"\n",
@@ -278,6 +299,34 @@ class CodexSession:
         self._acquire_lock()
         try:
             return self._recover_previous_locked(auto_archive_orphan=True)
+        finally:
+            self._release_lock()
+
+    def use_current_as_baseline(self) -> None:
+        """Explicit user action: retain the current file and archive stale takeover files."""
+        if self.active:
+            raise CodexConfigConflictError("当前接入仍在运行，请先关闭接入")
+        self._acquire_lock()
+        try:
+            self._validate_paths()
+            current = _current_bytes(self.config_path)
+            _validate_editable_shape(_parse_config(current or b""))
+            stamp = str(time.time_ns())
+            baseline = self.config_path.with_name(self.config_path.name + f".model-router.baseline.{stamp}.bak")
+            _atomic_write(baseline, current or b"", mode=0o600)
+            moved = []
+            try:
+                for path in (self.backup_path_for_write, self.state_path):
+                    if _lexists(path):
+                        if not path.is_file():
+                            raise CodexConfigConflictError("接管备份路径异常，已保留现场")
+                        archive = path.with_name(path.name + f".orphan.{stamp}")
+                        path.rename(archive)
+                        moved.append((path, archive))
+            except Exception:
+                for path, archive in reversed(moved):
+                    archive.rename(path)
+                raise
         finally:
             self._release_lock()
 
@@ -347,7 +396,31 @@ class CodexSession:
             self._remove_artifacts()
             return True
         if current is not None:
-            rebased = _rebase_managed_config(current, backup, state)
+            # Older releases did not persist enough managed fields to prove
+            # ownership. If the current file no longer contains our provider,
+            # startup can safely preserve it and archive only the stale artifacts.
+            try:
+                current_document = _parse_config(current)
+            except ValueError:
+                raise
+            providers = current_document.get("model_providers")
+            has_local_router = isinstance(providers, Table) and "local_router" in providers
+            provider_is_local_router = (
+                "model_provider" in current_document
+                and current_document["model_provider"].unwrap() == "local_router"
+            )
+            try:
+                rebased = _rebase_managed_config(current, backup, state)
+            except CodexConfigConflictError as exc:
+                if (
+                    auto_archive_orphan
+                    and not has_local_router
+                    and not provider_is_local_router
+                    and "旧托管状态缺少完整字段" in str(exc)
+                ):
+                    self._archive_artifacts()
+                    return True
+                raise
             if rebased is None:
                 if auto_archive_orphan:
                     self._archive_artifacts()
@@ -442,7 +515,8 @@ def _rebase_managed_config(current: bytes, backup: bytes, state: dict | None = N
         managed_provider is not None and managed_provider.unwrap() == "local_router"
     )
     if (not has_local_router and not provider_is_managed
-            and not key_matches_managed(document, "model", state["managed_model"])):
+            and not key_matches_managed(document, "model", state["managed_model"])
+            and not key_matches_managed(document, "model_catalog_json", state.get("managed_model_catalog_json"))):
         return None
 
     if has_local_router:
@@ -463,9 +537,16 @@ def _rebase_managed_config(current: bytes, backup: bytes, state: dict | None = N
             raise CodexConfigConflictError(
                 "Codex local_router 表已被外部修改，无法安全撤销接管；当前配置与备份已保留"
             )
+    if key_matches_managed(document, "model_catalog_json", state.get("managed_model_catalog_json")):
+        _restore_string_key(document, original, "model_catalog_json")
     managed_model = state["managed_model"]
     managed_provider_name = state["managed_model_provider"]
-    if key_matches_managed(document, "model", managed_model):
+    selected_catalog_model = provider_is_managed and any(
+        key_matches_managed(document, "model", slug)
+        for slug in state.get("managed_catalog_models", [])
+        if isinstance(slug, str)
+    )
+    if key_matches_managed(document, "model", managed_model) or selected_catalog_model:
         _restore_string_key(document, original, "model")
     if key_matches_managed(document, "model_provider", managed_provider_name):
         _restore_string_key(document, original, "model_provider")

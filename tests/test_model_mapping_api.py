@@ -74,3 +74,16 @@ def test_responses_request_to_chat_service_returns_responses_shape(tmp_path):
     response = asyncio.run(run())
     assert response.status_code == 200
     assert response.json()["output"][0]["content"][0]["text"] == "ok"
+
+
+def test_status_provides_codex_catalog_for_selected_models_only(tmp_path):
+    app = create_app(mapped_config(), state_file=tmp_path / 'state.yaml')
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://router') as client:
+            result = (await client.get('/v1/status')).json()
+        await app.state.router.close()
+        return result
+    catalog = asyncio.run(run())['codex_catalog']
+    assert [m['slug'] for m in catalog['models']] == ['A/gpt', 'B/sonnet']
+    assert all(m['visibility'] == 'list' and m['supported_in_api'] for m in catalog['models'])
+    assert 'http://' not in json.dumps(catalog)
