@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 WEB = Path(__file__).parents[1] / "web" / "index.html"
+CONSOLE = Path(__file__).parents[1] / "web" / "console.js"
 
 
 def test_dashboard_exposes_all_models_as_multi_select_model_plaza():
@@ -74,3 +75,17 @@ def test_workbench_exposes_benchmark_freshness_and_tri_state_controls():
     assert 'data-bench' in html
     assert 'indeterminate' in html
     assert '测速过期' in html
+
+
+def test_status_refresh_tolerates_removed_legacy_dashboard_counters():
+    js = CONSOLE.read_text(encoding="utf-8")
+    assert "function setText(id,value)" in js
+    for element_id in ("current", "pool-count", "healthy-count", "public-model"):
+        assert f"setText('{element_id}'" in js
+
+
+def test_speed_sort_puts_measured_models_before_unmeasured_defaults():
+    js = CONSOLE.read_text(encoding="utf-8")
+    assert "const aBenchmarked=Number(a.last_update)>0" in js
+    assert "if(aBenchmarked!==bBenchmarked)" in js
+    assert "measured?displayNumber(m.tps,'')" in js

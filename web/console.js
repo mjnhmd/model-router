@@ -1,6 +1,7 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
+  function setText(id,value) { const el=$(id); if (el) el.textContent=value; }
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   let statusData = {models: []}, configData = null, selectedService = null;
   let dirty = false, saving = false, statusPromise = null, statusQueued = false;
@@ -48,10 +49,10 @@
       try {
         statusData = await jsonFetch('/v1/status');
         const models = statusData.models || [];
-        $('current').textContent = recommendationLabel(statusData, 'responses') || '无可用';
-        $('pool-count').textContent = (statusData.enabled_count ?? models.filter(m=>m.enabled).length) + ' 个';
-        $('healthy-count').textContent = models.filter(m=>m.healthy && m.enabled).length + ' 个';
-        $('public-model').textContent = statusData.public_model || '—';
+        setText('current', recommendationLabel(statusData, 'responses') || '无可用');
+        setText('pool-count', (statusData.enabled_count ?? models.filter(m=>m.enabled).length) + ' 个');
+        setText('healthy-count', models.filter(m=>m.healthy && m.enabled).length + ' 个');
+        setText('public-model', statusData.public_model || '—');
         $('updated').textContent = '更新于 ' + new Date().toLocaleTimeString(); $('updated').className = 'muted status-fresh';
         updateStatusSummary();
         renderDashboard();
@@ -177,7 +178,7 @@
   $('add-service').onclick=addService; $('reload-config').onclick=()=>{if(confirmLeave())loadConfig()}; $('save-config').onclick=saveConfig;
 
   function filteredModels(){const q=filterText.trim().toLowerCase();return (statusData.models||[]).filter(m=>!q||[m.service,m.model,m.wire_api].some(v=>String(v||'').toLowerCase().includes(q)));}
-  function orderedModels(models){return models.slice().sort((a,b)=>sortMode==='name'?String(a.model).localeCompare(String(b.model),'zh-CN'):sortMode==='speed'?Number(b.tps||-1)-Number(a.tps||-1):sortMode==='latency'?Number(a.latency||Infinity)-Number(b.latency||Infinity):sortMode==='price'?priceValue(a)-priceValue(b):Number(b.enabled)-Number(a.enabled)||Number(b.tps||-1)-Number(a.tps||-1));}
+  function orderedModels(models){return models.slice().sort((a,b)=>{if(sortMode==='speed'){const aBenchmarked=Number(a.last_update)>0,bBenchmarked=Number(b.last_update)>0;if(aBenchmarked!==bBenchmarked)return aBenchmarked?-1:1;return Number(b.tps||-1)-Number(a.tps||-1)||Number(selectedForMode(b))-Number(selectedForMode(a));}if(sortMode==='name')return String(a.model).localeCompare(String(b.model),'zh-CN');if(sortMode==='latency')return Number(a.latency||Infinity)-Number(b.latency||Infinity);if(sortMode==='price')return priceValue(a)-priceValue(b);return Number(b.enabled)-Number(a.enabled)||Number(b.tps||-1)-Number(a.tps||-1);});}
   function priceValue(m){const p=m.pricing||{};return typeof p.output_per_million==='number'?p.output_per_million:typeof p.input_per_million==='number'?p.input_per_million:Infinity;}
   function priceText(m){const p=m.pricing||{},a=[];if(typeof p.input_per_million==='number')a.push('入 $'+p.input_per_million.toFixed(2));if(typeof p.output_per_million==='number')a.push('出 $'+p.output_per_million.toFixed(2));return a.length?a.join(' / ')+' / 1M tokens':'未提供';}
   function displayNumber(v,suffix){return typeof v==='number'&&isFinite(v)&&v>0 ? v.toFixed(1)+suffix : '—';}
@@ -216,7 +217,7 @@
     const grid=$('model-grid'); if(!grid)return; grid.classList.add('model-list');
     const services=[]; models.forEach(m=>{if(!services.includes(m.service))services.push(m.service)});
     grid.innerHTML=services.map(service=>{const serviceModels=all.filter(m=>m.service===service), chosen=serviceModels.filter(selectedForMode).length, visible=models.filter(m=>m.service===service); const groupChecked=chosen===serviceModels.length, groupMixed=chosen>0&&!groupChecked;
-      return '<div class="service-divider"><input class="service-check" type="checkbox" '+(groupChecked?'checked':'')+' '+(groupMixed?'data-mixed="true"':'')+' data-service="'+esc(service)+'" aria-label="选择 '+esc(service)+' 全部模型"><b>'+esc(service)+'</b><span class="muted">'+chosen+'/'+serviceModels.length+'</span><button class="group-action" data-service="'+esc(service)+'">'+(groupChecked?'清空':'全选')+'</button></div>'+visible.map(m=>{const picked=selectedForMode(m); return '<div class="model-tile '+(picked?'selected':'off')+'" data-key="'+esc(m.key)+'" data-bench="'+(m.last_update?'ready':'none')+'"><div class="tile-top"><div><div class="tile-name" title="'+esc(m.model)+'">'+esc(m.model)+'</div><div class="tile-service">'+esc(m.service)+' · '+esc(m.wire_api||'')+'</div></div><input class="tile-check" type="checkbox" '+(picked?'checked':'')+' data-key="'+esc(m.key)+'" aria-label="选择 '+esc(m.service+'/'+m.model)+'"></div><div class="tile-speed"><strong>'+displayNumber(m.tps,'')+'</strong><span>'+((typeof m.tps==='number'&&m.tps>0)?'tokens/s':'未知速度')+'<br>'+freshness(m)+'</span></div><div class="tile-meta"><span>延迟 '+displayNumber(m.latency,'s')+'</span><span>'+(m.healthy?'<span class="badge ok">健康</span>':'<span class="badge down">异常</span>')+'</span></div><div class="tile-tags">'+esc([m.supports_tools?'工具':'',m.supports_vision?'视觉':'',m.supports_reasoning?'推理':''].filter(Boolean).join(' · '))+'</div></div>';}).join('')}).join('') || '<div class="empty">还没有模型，请先配置服务</div>';
+      return '<div class="service-divider"><input class="service-check" type="checkbox" '+(groupChecked?'checked':'')+' '+(groupMixed?'data-mixed="true"':'')+' data-service="'+esc(service)+'" aria-label="选择 '+esc(service)+' 全部模型"><b>'+esc(service)+'</b><span class="muted">'+chosen+'/'+serviceModels.length+'</span><button class="group-action" data-service="'+esc(service)+'">'+(groupChecked?'清空':'全选')+'</button></div>'+visible.map(m=>{const picked=selectedForMode(m), measured=Number(m.last_update)>0; return '<div class="model-tile '+(picked?'selected':'off')+'" data-key="'+esc(m.key)+'" data-bench="'+(measured?'ready':'none')+'"><div class="tile-top"><div><div class="tile-name" title="'+esc(m.model)+'">'+esc(m.model)+'</div><div class="tile-service">'+esc(m.service)+' · '+esc(m.wire_api||'')+'</div></div><input class="tile-check" type="checkbox" '+(picked?'checked':'')+' data-key="'+esc(m.key)+'" aria-label="选择 '+esc(m.service+'/'+m.model)+'"></div><div class="tile-speed"><strong>'+(measured?displayNumber(m.tps,''):'—')+'</strong><span>'+(measured&&typeof m.tps==='number'&&m.tps>0?'tokens/s':'未测速')+'<br>'+freshness(m)+'</span></div><div class="tile-meta"><span>延迟 '+displayNumber(m.latency,'s')+'</span><span>'+(m.healthy?'<span class="badge ok">健康</span>':'<span class="badge down">异常</span>')+'</span></div><div class="tile-tags">'+esc([m.supports_tools?'工具':'',m.supports_vision?'视觉':'',m.supports_reasoning?'推理':''].filter(Boolean).join(' · '))+'</div></div>';}).join('')}).join('') || '<div class="empty">还没有模型，请先配置服务</div>';
     grid.querySelectorAll('.service-check').forEach(input=>{if(input.dataset.mixed)input.indeterminate=true; input.onchange=()=>runToggle(all.filter(m=>m.service===input.dataset.service).map(m=>m.key),input.checked)});
     grid.querySelectorAll('input.tile-check').forEach(input=>input.onchange=()=>runToggle([input.dataset.key],input.checked));
     grid.querySelectorAll('.group-action').forEach(btn=>btn.onclick=()=>{const ms=all.filter(m=>m.service===btn.dataset.service),enable=ms.some(m=>!selectedForMode(m));runToggle(ms.map(m=>m.key),enable);});
