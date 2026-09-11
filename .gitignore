@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local config with secrets
+config.local.yaml
+config.yaml
+
+# 本地启停状态（用户选择，不入库）
+config.state.yaml

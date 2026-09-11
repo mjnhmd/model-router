@@ -1,0 +1,94 @@
+stages:
+  - test
+  - package
+  - release
+
+default:
+  image: python:3.11-slim
+  before_script:
+    - python -m pip install --disable-pip-version-check --no-cache-dir uv
+    - uv sync --frozen
+  cache:
+    key:
+      files:
+        - uv.lock
+    paths:
+      - .cache/uv
+    policy: pull-push
+  variables:
+    UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
+
+test:
+  stage: test
+  script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends nodejs
+    - uv run python -m pytest -q
+    - uv run python -m compileall -q src tests
+    - node --check web/console.js
+
+package_wheel:
+  stage: package
+  script:
+    - uv build --wheel
+    - |
+      python - <<'PY'
+      from pathlib import Path
+      import zipfile
+
+      wheels = sorted(Path("dist").glob("*.whl"))
+      if len(wheels) != 1:
+          raise SystemExit(f"expected exactly one wheel, found {wheels}")
+      required = {"model_router/web/index.html", "model_router/web/console.js"}
+      with zipfile.ZipFile(wheels[0]) as archive:
+          names = set(archive.namelist())
+      missing = required - names
+      if missing:
+          raise SystemExit(f"wheel is missing embedded web assets: {sorted(missing)}")
+      print(f"validated {wheels[0]}")
+      PY
+  artifacts:
+    name: "model-router-wheel-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - dist/*.whl
+    expire_in: 30 days
+
+# Building the native App needs a macOS arm64 Runner. Keep it manual so a
+# project without that Runner still gets a green push pipeline and wheel.
+package_macos:
+  stage: package
+  tags:
+    - macos-arm64
+  script:
+    - bash scripts/build_app.sh
+  artifacts:
+    name: "model-router-macos-$CI_COMMIT_TAG"
+    paths:
+      - dist/ModelRouter.app
+      - dist/ModelRouter-macos-*.dmg
+      - dist/ModelRouter-macos-*.zip
+    expire_in: 30 days
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\\d+\\.\\d+\\.\\d+$/ && $CI_PIPELINE_SOURCE == "push"'
+      when: manual
+    - when: never
+
+create_release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: package_wheel
+      artifacts: true
+  script:
+    - echo "creating Release $CI_COMMIT_TAG"
+  release:
+    tag_name: "$CI_COMMIT_TAG"
+    name: "Model Router $CI_COMMIT_TAG"
+    description: "自动构建的 Model Router $CI_COMMIT_TAG。下载 wheel 后可直接安装；macOS App 资产由 macOS Runner 任务提供。"
+    assets:
+      links:
+        - name: "model-router-wheel"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/download?job=package_wheel"
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\\d+\\.\\d+\\.\\d+$/ && $CI_PIPELINE_SOURCE == "push"'
+    - when: never

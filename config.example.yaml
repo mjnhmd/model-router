@@ -1,0 +1,41 @@
+# model-router 示例配置 —— 复制为 config.yaml 后修改
+# 对外暴露的模型名（Codex / OpenAI SDK 里填这个）
+public_model: route-fastest
+
+# Codex 接入默认关闭；开启后才会修改 Codex 配置
+codex:
+  enabled: false
+  mode: fastest  # fastest | mapped
+  # mode=mapped 时填写稳定的 service-id/model-name
+  models: []
+
+# 探测间隔（秒）：后台定期刷新各模型速度
+bench_interval: 60
+# 会话固定：开启后同一 Codex 会话优先保持同一模型；模型不可用时自动换
+stick_session_to_model: true
+# 并发测速上限：避免探针把上游打满
+bench_concurrency: 4
+# 每个模型连测几轮取 EWMA；手动测速固定只测一轮
+bench_rounds: 1
+# 长文探针：要求模型生成的输出 token 数（长文吞吐优先）
+# 探测会完整读取流式输出，并使用最终 usage 计算真实吞吐
+bench_target_tokens: 256
+# 单个测速探针超时（秒），实际最多 10 秒，独立于真实请求超时
+bench_timeout_seconds: 10
+# 请求超时（秒）：超过视为该模型不可用
+timeout_seconds: 120
+
+services:
+  - name: demo-service          # 服务名，日志/表格里显示
+    base_url: https://api.example.com/v1
+    api_key: sk-your-token
+    wire_api: responses          # responses | chat（第一版只支持这两种 OpenAI 兼容格式）
+    # 模型由 App 保存服务时自动从 /v1/models 获取，不需要手动填写
+    models: []
+
+  # 你自己的其他服务照抄这个块
+  # - name: another-service
+  #   base_url: https://xxx/v1
+  #   api_key: sk-xxx
+  #   wire_api: chat
+  #   models: []  # 保存后自动从该服务的 /models 获取
