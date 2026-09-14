@@ -68,6 +68,10 @@ def test_workbench_has_single_model_list_and_mode_panels():
     assert '加入自动择快池' in html
     assert '暴露给 Codex' in html
     assert 'Codex 接入' in html
+    assert 'id="start-fastest"' in html
+    assert 'id="start-mapped"' in html
+    assert 'id="stop-codex"' in html
+    assert 'id="codex-use-status"' in html
 
 
 def test_workbench_exposes_benchmark_freshness_and_tri_state_controls():
@@ -97,4 +101,10 @@ def test_workbench_exposes_codex_recovery_notice():
         assert marker in html, marker
     console = CONSOLE.read_text(encoding="utf-8")
     for marker in ('get_codex_state', 'reconnect_codex', 'applyCodexState', 'refreshCodexState'):
+        assert marker in console, marker
+
+
+def test_workbench_exposes_explicit_mode_lifecycle_controls():
+    console = CONSOLE.read_text(encoding="utf-8")
+    for marker in ('startMode', 'stopCodex', 'codex-use-status', 'codex_usage_mode'):
         assert marker in console, marker

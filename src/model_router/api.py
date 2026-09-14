@@ -9,7 +9,7 @@ from collections import deque
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from pathlib import Path
 
@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Config, ServiceSpec, save_config
+from .client_identity import client_headers as inbound_client_headers
 from .codex_catalog import build_catalog
 from .router import MAX_BENCH_TARGET_TOKENS, Router
 from .state import RouterState
@@ -271,6 +272,7 @@ def create_app(
                 "current_model": router.current_model(),
                 "codex_enabled": router.config.codex.enabled,
                 "codex_mode": router.config.codex.mode,
+                "codex_usage_mode": router.config.codex.mode if router.config.codex.enabled else "none",
                 "codex_catalog": build_catalog(exposed, router.status_snapshot()),
                 "enabled_count": len(router.enabled),
                 "responses_configured": bool(responses) or bool(exposed),
@@ -521,10 +523,13 @@ def create_app(
                     session_models.popitem(last=False)
         return chosen
 
-    async def _forward_selected(body: dict, wire_api: str, endpoint: str, chosen: str):
+    async def _forward_selected(
+        body: dict, wire_api: str, endpoint: str, chosen: str, inbound_headers: Mapping[str, str]
+    ):
         service_name, model_name = chosen.split("/", 1)
         client = router.upstreams[service_name]
-        headers = {"Authorization": f"Bearer {client.service.api_key}"}
+        headers = inbound_client_headers(inbound_headers)
+        headers["Authorization"] = f"Bearer {client.service.api_key}"
         requested_model = body.get("model")
         outbound = dict(body)
         outbound["model"] = model_name
@@ -574,7 +579,7 @@ def create_app(
             attempts += 1
             try:
                 response = await asyncio.wait_for(
-                    _forward_selected(body, wire_api, endpoint, chosen),
+                    _forward_selected(body, wire_api, endpoint, chosen, request.headers),
                     timeout=max(0.001, retry_deadline - time.monotonic()),
                 )
             except asyncio.TimeoutError as exc:

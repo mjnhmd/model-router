@@ -121,6 +121,18 @@ def test_codex_monitor_follows_runtime_codex_enabled_switch(tmp_path):
     assert config.read_bytes() == original
 
 
+def test_restore_codex_control_restores_original_config_immediately(tmp_path):
+    monitor, config = make_monitor(tmp_path)
+    original = config.read_bytes()
+    monitor.sync(ready_status())
+    assert config.read_bytes() != original
+
+    result = gui._CodexControl(monitor).restore_codex()
+
+    assert result["state"] == "waiting"
+    assert config.read_bytes() == original
+
+
 def test_codex_attaches_after_first_configuration_becomes_ready(tmp_path):
     monitor, config = make_monitor(tmp_path)
     original = config.read_bytes()

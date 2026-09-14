@@ -205,6 +205,22 @@ class _CodexControl:
                 monitor.error = f"Codex 接入仍然失败：{exc}；当前配置与备份已保留。"
             return self.get_codex_state()
 
+    def restore_codex(self) -> dict:
+        """Restore the original Codex config after the user stops using a mode."""
+        with self._lock:
+            monitor = self._monitor
+            if monitor is None:
+                return {"state": "disabled", "message": "本次启动未启用 Codex 接入。"}
+            try:
+                if monitor.session.active:
+                    monitor.session.restore()
+                monitor.public_model = None
+                monitor.catalog = None
+                return self.get_codex_state()
+            except Exception as exc:
+                monitor.error = f"Codex 原配置恢复失败：{exc}；当前配置与备份已保留。"
+                return self.get_codex_state()
+
 
 def _bind_monitor_errors(window: webview.Window, monitor: _CodexMonitor) -> None:
     def show_error() -> None:

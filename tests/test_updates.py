@@ -1,7 +1,11 @@
 import asyncio
 from types import SimpleNamespace
 
-from model_router.updates import check_for_update, normalize_version
+from model_router.updates import RELEASES_URL, check_for_update, normalize_version
+
+
+def test_update_checker_uses_public_github_releases_by_default():
+    assert RELEASES_URL == "https://api.github.com/repos/mjnhmd/model-router/releases?per_page=1"
 
 
 def test_normalize_version_accepts_release_tag():

@@ -107,6 +107,15 @@
     const ready = statusData.responses_ready === false ? 'Responses 不可用' : 'Responses 可用';
     summary.textContent = ready + ' · Responses 推荐 ' + (recommendationLabel(statusData,'responses') || '—') + ' · Chat 推荐 ' + (recommendationLabel(statusData,'chat') || '—') + (statusData.instance_id ? ' · 实例 ' + statusData.instance_id : '');
   }
+  function codexModeLabel(mode) { return mode === 'fastest' ? '自动择快' : mode === 'mapped' ? '模型映射' : '未开启'; }
+  function renderCodexUsageStatus() {
+    const mode = statusData.codex_usage_mode || ((configData && configData.codex && configData.codex.enabled) ? (configData.codex.mode || 'fastest') : 'none');
+    setText('codex-use-status', '当前使用：' + codexModeLabel(mode));
+    const active = !!(configData && configData.codex && configData.codex.enabled);
+    ['start-fastest','start-mapped','stop-codex'].forEach(id => { const button=$(id); if(button) button.disabled = saving; });
+    setText('start-fastest', active && mode === 'fastest' ? '关闭自动择快' : '开始使用自动择快');
+    setText('start-mapped', active && mode === 'mapped' ? '关闭模型映射' : '开始使用模型映射');
+  }
 
   function renderServices() {
     if (!configData) return;
@@ -188,15 +197,16 @@
     $('bench-interval').oninput=()=>{dirty=true;window.__draftRevision=(window.__draftRevision||0)+1;validateConfig(false); const n=Number($('bench-interval').value);if(n>=1&&n<=1440&&Number.isInteger(n))configData.bench_interval=Math.round(n*60);};
     $('stick-session').onchange=()=>{configData.stick_session_to_model=$('stick-session').value==='true';dirty=true;window.__draftRevision=(window.__draftRevision||0)+1;};
   }
-  async function saveConfig(){
+  async function saveConfig(enabledOverride){
     if(!configData||saving)return;
     if(!validateConfig(true)){toast('请先修正表单错误',true);return;}
     saving=true; const button=$('save-config'); button.disabled=true; button.textContent='保存中…'; const revision=window.__draftRevision||0;
-    const payload=clone(configData); payload.codex=payload.codex||{enabled:false,mode:'fastest',models:[]}; payload.codex.mode=workbenchMode; payload.services=payload.services.map(s=>{const d=clone(drafts[serviceId(s)]||s); const keepKey=!!d.api_key_set && !d.api_key; delete d.api_key_set; if(keepKey) delete d.api_key; d.id=serviceId(s); return d;});
+    const payload=clone(configData); payload.codex=payload.codex||{enabled:false,mode:'fastest',models:[]}; payload.codex.mode=workbenchMode; if(typeof enabledOverride==='boolean') payload.codex.enabled=enabledOverride; payload.services=payload.services.map(s=>{const d=clone(drafts[serviceId(s)]||s); const keepKey=!!d.api_key_set && !d.api_key; delete d.api_key_set; if(keepKey) delete d.api_key; d.id=serviceId(s); return d;});
     try { await jsonFetch('/v1/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-      if ((window.__draftRevision||0)===revision) { await loadConfig(); await refreshStatus(); switchView('dashboard'); dirty=false; toast('配置已保存，正在重新测速'); }
+      if ((window.__draftRevision||0)===revision) { await loadConfig(); await refreshStatus(); switchView('dashboard'); dirty=false; toast(payload.codex.enabled?'已开始使用'+codexModeLabel(payload.codex.mode):'已关闭 Codex 使用并恢复原配置'); }
       else { dirty=true; toast('保存成功，但检测到保存期间的新编辑，请再次保存'); }
-    } catch(error){toast(error.message,true);} finally{saving=false;button.disabled=false;button.textContent='保存配置';}
+      return true;
+    } catch(error){toast(error.message,true); return false;} finally{saving=false;button.disabled=false;button.textContent='保存配置';}
   }
   function confirmLeave(){ return !dirty || window.confirm('有未保存的配置修改，仍要离开吗？'); }
   function switchView(view){ if(view!=='settings' && !confirmLeave())return; document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));document.querySelectorAll('.view').forEach(s=>s.classList.toggle('active',s.id===view+'-view')); }
@@ -236,7 +246,7 @@
     if (!force && document.activeElement && document.activeElement.closest && document.activeElement.closest('#model-grid')) return;
     const all=statusData.models||[], models=orderedModels(filteredModels());
     $('selection-label').textContent=workbenchMode==='fastest'?'加入自动择快池':'暴露给 Codex';
-    $('codex-enabled').checked=!!(configData&&configData.codex&&configData.codex.enabled);
+    renderCodexUsageStatus();
     $('stick-session-workbench').checked=!!(configData&&configData.stick_session_to_model!==false);
     const selected=all.filter(selectedForMode); selectionSummary(workbenchMode==='fastest'?'fastest-summary':'mapping-summary',selected,'还没有选择模型');
     if(workbenchMode==='mapped') selectionSummary('mapping-preview',selected,'选择模型后这里会预览 Codex 列表');
@@ -254,12 +264,16 @@
   $('select-visible').onchange=function(){runToggle(filteredModels().map(m=>m.key),this.checked)};
   $('sort-mode').onchange=function(){sortMode=this.value;renderDashboard()};
   document.querySelectorAll('.mode-tab').forEach(tab=>tab.onclick=()=>{workbenchMode=tab.dataset.mode;document.querySelectorAll('.mode-tab').forEach(t=>t.classList.toggle('active',t===tab));$('fastest-panel').hidden=workbenchMode!=='fastest';$('mapping-panel').hidden=workbenchMode!=='mapped';renderDashboard(true)});
+  async function startMode(mode){ workbenchMode=mode; document.querySelectorAll('.mode-tab').forEach(t=>t.classList.toggle('active',t.dataset.mode===mode)); $('fastest-panel').hidden=mode!=='fastest'; $('mapping-panel').hidden=mode!=='mapped'; if(configData){configData.codex=configData.codex||{enabled:false,mode:'fastest',models:[]}; configData.codex.enabled=true;} renderDashboard(true); await saveConfig(true); }
+  async function stopCodex(){ if(!configData)return; configData.codex=configData.codex||{enabled:false,mode:workbenchMode,models:[]}; configData.codex.enabled=false; renderDashboard(true); if(!await saveConfig(false))return; const api=window.pywebview&&window.pywebview.api; if(api&&typeof api.restore_codex==='function'){try{applyCodexState(await api.restore_codex());}catch(error){toast(error.message,true);}} await refreshStatus(); }
   $('stick-session-workbench').onchange=function(){configData.stick_session_to_model=this.checked;dirty=true;renderDashboard()};
-  $('codex-enabled').onchange=function(){if(!configData.codex)configData.codex={enabled:false,mode:'fastest',models:[]};configData.codex.enabled=this.checked;dirty=true;renderDashboard()};
   $('bench-now').onclick=async()=>{try{await jsonFetch('/v1/bench',{method:'POST'});toast('已开始测速当前选择模型')}catch(e){toast(e.message,true)}};
   $('bench-cancel').onclick=async()=>{try{await jsonFetch('/v1/bench/cancel',{method:'POST'});toast('测速已停止')}catch(e){toast(e.message,true)}};
   $('save-workbench').onclick=saveConfig;
-  $('apply-codex').onclick=saveConfig;
+  $('start-fastest').onclick=()=>{ const active=configData&&configData.codex&&configData.codex.enabled&&workbenchMode==='fastest'; active?stopCodex():startMode('fastest'); };
+  $('start-mapped').onclick=()=>{ const active=configData&&configData.codex&&configData.codex.enabled&&workbenchMode==='mapped'; active?stopCodex():startMode('mapped'); };
+  $('stop-codex').onclick=stopCodex;
+  $('stop-codex-mapped').onclick=stopCodex;
   function formatTokens(v){const n=Number(v||0);return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);}
   function renderLogs(items){$('log-list').innerHTML=items.length?items.map(i=>'<div class="log-row"><span class="log-time">'+esc(i.time)+'</span><span class="log-model">'+esc(i.model)+'</span><span class="log-detail">'+esc(i.endpoint)+'</span><span>'+(i.ok?'<span class="log-ok">成功 '+i.status_code+'</span>':'<span class="log-fail">失败 '+i.status_code+'</span>')+'</span><span class="log-meta">'+Number(i.latency||0).toFixed(2)+'s</span></div>').join(''):'<div class="empty">暂无请求记录</div>';}
   async function refreshLogs(){try{const r=await jsonFetch('/v1/logs?limit=100');renderLogs(r.logs||[]);$('logs-updated').textContent='更新于 '+new Date().toLocaleTimeString();}catch(e){$('logs-updated').textContent='日志离线：'+e.message;$('logs-updated').className='muted status-stale';}}
