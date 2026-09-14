@@ -1,6 +1,6 @@
 [project]
 name = "model-router"
-version = "0.2.0"
+version = "0.2.1"
 description = "本地 OpenAI 兼容网关：按实时测速 + 能力过滤，把请求路由到最快可用模型"
 requires-python = ">=3.10"
 dependencies = [
