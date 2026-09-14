@@ -15,3 +15,6 @@ config.yaml
 
 # 本地启停状态（用户选择，不入库）
 config.state.yaml
+
+# 本地工具缓存（release skill 等）
+.omc/
