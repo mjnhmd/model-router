@@ -32,6 +32,10 @@ done
 
 tree="$(git write-tree)"
 parent="$(git rev-parse "$remote/$branch")"
+if [ "$tree" = "$(git rev-parse "$parent^{tree}")" ]; then
+  echo "公开仓库已是最新（树一致），跳过推送：${tree:0:7}"
+  exit 0
+fi
 commit="$(git commit-tree "$tree" -p "$parent" -m "$message")"
 git push "$remote" "$commit:refs/heads/$branch"
-echo "已发布 ${commit:0:7} → $remote/$branch（本地 HEAD $(git rev-parse --short HEAD)）"
+echo "已发布 ${commit:0:7} → ${remote}/${branch}（本地 HEAD $(git rev-parse --short HEAD)）"
