@@ -603,3 +603,19 @@ def test_workbench_reconnect_resumes_after_conflict_and_restores_new_baseline(mo
         monitor.stop()
         monitor.session.restore()
     assert config.read_bytes() == baseline
+
+
+def test_frozen_app_honours_explicit_config_path(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    explicit = tmp_path / "nested" / "config.yaml"
+    explicit.parent.mkdir()
+    explicit.write_text("public_model: route-fastest\n", encoding="utf-8")
+
+    app_config = str(
+        Path.home() / "Library" / "Application Support" / "ModelRouter" / "config.yaml"
+    )
+
+    assert gui._resolve_config_file(str(explicit), explicit=True) == str(explicit)
+    # 未显式指定时仍以应用支持目录为准，避免双击启动时误读当前工作目录的 config.yaml
+    assert gui._resolve_config_file(str(explicit)) == app_config
+    assert gui._resolve_config_file("config.yaml") == app_config

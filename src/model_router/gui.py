@@ -241,10 +241,14 @@ def run(
     port: int = DEFAULT_PORT,
     auto_attach: bool | None = None,
     codex_config: str = DEFAULT_CODEX_CONFIG,
+    config_explicit: bool = False,
 ) -> None:
-    """启动独立 App；仅在 Codex 接入开关开启时修改 Codex 配置。"""
+    """启动独立 App；仅在 Codex 接入开关开启时修改 Codex 配置。
+
+    ``config_explicit`` 表示调用方通过 ``-c`` 指定了配置路径，打包后也必须原样使用。
+    """
     try:
-        config_file = _resolve_config_file(config_file)
+        config_file = _resolve_config_file(config_file, explicit=config_explicit)
         app_config = _load_config_for_app(config_file)
     except Exception as exc:
         _report_error(f"配置无法加载：{exc}")
@@ -339,9 +343,9 @@ def _report_error(message: str) -> None:
         print(f"Model Router: {message}")
 
 
-def _resolve_config_file(config_file: str) -> str:
+def _resolve_config_file(config_file: str, explicit: bool = False) -> str:
     path = Path(config_file).expanduser()
-    if not getattr(sys, "frozen", False) or path.name != "config.yaml":
+    if not getattr(sys, "frozen", False) or explicit or path.name != "config.yaml":
         return str(path)
 
     app_data = Path.home() / "Library" / "Application Support" / "ModelRouter"
@@ -368,7 +372,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Model Router 独立 App")
-    parser.add_argument("-c", "--config", default="config.yaml", help="配置文件路径")
+    parser.add_argument("-c", "--config", default=None, help="配置文件路径")
     parser.add_argument("-p", "--port", type=int, default=DEFAULT_PORT, help="本地代理端口")
     parser.add_argument(
         "--codex-config",
@@ -378,8 +382,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-attach", action="store_true", help="本次启动不接入 Codex")
     args = parser.parse_args()
     run(
-        config_file=args.config,
+        config_file=args.config or "config.yaml",
         port=args.port,
         auto_attach=False if args.no_attach else None,
         codex_config=args.codex_config,
+        config_explicit=args.config is not None,
     )

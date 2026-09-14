@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
 import time
 from importlib.metadata import PackageNotFoundError, version as package_version
 from collections import deque
@@ -18,6 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__ as source_version
 from .config import Config, ServiceSpec, save_config
 from .client_identity import client_headers as inbound_client_headers
 from .codex_catalog import build_catalog
@@ -38,9 +40,31 @@ MAX_REQUEST_RETRIES = 3
 REQUEST_RETRY_BUDGET_SECONDS = 30.0
 
 try:
+    # 打包后的 App 没有发行元数据，回落到包内版本，避免界面显示 0.0.0
     CURRENT_VERSION = package_version("model-router")
 except PackageNotFoundError:
-    CURRENT_VERSION = "0.0.0"
+    CURRENT_VERSION = source_version
+
+_PROCESS_STARTED_AT = time.time()
+
+
+def _app_build_time() -> float:
+    """打包 App 取运行中二进制的修改时间，用于发现磁盘已被新版本替换。
+
+    源码模式返回 0：开发时随时改文件，不参与“需要重启”判定。
+    """
+    if not getattr(sys, "frozen", False):
+        return 0.0
+    try:
+        return Path(sys.executable).stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _iso_time(stamp: float) -> str:
+    if not stamp:
+        return ""
+    return datetime.fromtimestamp(stamp).astimezone().isoformat(timespec="seconds")
 
 def create_app(
     config: Config,
@@ -89,6 +113,7 @@ def create_app(
         input_tokens: int = 0,
         output_tokens: int = 0,
         error: str = "",
+        hint: str = "",
     ) -> None:
         now = datetime.now().astimezone().isoformat(timespec="seconds")
         request_stats["total_requests"] += 1
@@ -127,6 +152,7 @@ def create_app(
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "error": error,
+                "hint": hint,
             }
         )
 
@@ -255,6 +281,7 @@ def create_app(
 
     @app.get("/v1/status")
     async def status() -> dict:
+        build_time = _app_build_time()
         responses = router.candidates_for(wire_api="responses", supports_reasoning=False)
         chat = router.candidates_for(wire_api="chat", supports_reasoning=False)
         exposed = router.exposed_models()
@@ -268,6 +295,9 @@ def create_app(
             {
                 "model_router": "model-router",
                 "instance_id": instance_id,
+                "version": CURRENT_VERSION,
+                "app_build_time": _iso_time(build_time),
+                "app_restart_required": bool(build_time and build_time > _PROCESS_STARTED_AT),
                 "public_model": router.default_public_model(),
                 "current_model": router.current_model(),
                 "codex_enabled": router.config.codex.enabled,
@@ -743,6 +773,7 @@ async def _forward(
         input_tokens: int = 0,
         output_tokens: int = 0,
         error: str = "",
+        hint: str = "",
     ) -> None:
         nonlocal recorded
         if recorded:
@@ -758,6 +789,7 @@ async def _forward(
             input_tokens,
             output_tokens,
             error,
+            hint,
         )
 
     def observe(elapsed: float, out_tokens: int):
@@ -773,7 +805,12 @@ async def _forward(
         if resp.status_code >= 400:
             text = (await resp.aread()).decode("utf-8", "replace")
             await resp.aclose()
-            record(resp.status_code, False, error=f"upstream_status_{resp.status_code}")
+            record(
+                resp.status_code,
+                False,
+                error=f"upstream_status_{resp.status_code}",
+                hint=_upstream_error_hint(resp.status_code, text, headers),
+            )
             return JSONResponse(status_code=resp.status_code, content=_safe_json(text))
         if not stream:
             try:
@@ -920,6 +957,42 @@ async def _sse_gen(
                 out_tokens,
                 "" if completed else "stream ended before completion",
             )
+
+
+_OFFICIAL_CLIENT_MARKERS = (
+    "codex official client",
+    "official clients",
+    "only allows codex",
+)
+
+
+def _looks_like_codex_client(forwarded: Mapping[str, str]) -> bool:
+    """只有真正带 Codex 标识的请求才算“已转发身份”；普通 SDK 的 UA 不算。"""
+    if (forwarded.get("originator") or "").strip():
+        return True
+    agent = (forwarded.get("user-agent") or "").strip().lower()
+    return agent.startswith("codex") or "codex_cli_rs" in agent
+
+
+def _upstream_error_hint(status_code: int, text: str, forwarded: Mapping[str, str]) -> str:
+    """把上游的准入类拒绝翻成可执行的中文说明；不改写上游响应正文。"""
+    if status_code != 403 or not text:
+        return ""
+    lowered = text.lower()
+    if not any(marker in lowered for marker in _OFFICIAL_CLIENT_MARKERS):
+        return ""
+    identity = _looks_like_codex_client(forwarded)
+    if identity:
+        return (
+            "上游只放行 Codex 官方客户端：本次已带 Codex 标识仍被拒。"
+            "若你用的就是 Codex，多半是运行中的 Model Router 还是旧进程，"
+            "请退出并重新打开 App 后重试；手工构造的请求请改用 Codex 客户端，"
+            "或换用不校验身份的服务。"
+        )
+    return (
+        "上游只放行 Codex 官方客户端，而本次请求没有携带 Codex 客户端标识"
+        "（Originator / User-Agent）；请从 Codex 客户端发起，或换用不校验身份的服务。"
+    )
 
 
 def _safe_json(text: str) -> dict:

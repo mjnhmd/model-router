@@ -55,6 +55,7 @@
         setText('public-model', statusData.public_model || '—');
         $('updated').textContent = '更新于 ' + new Date().toLocaleTimeString(); $('updated').className = 'muted status-fresh';
         updateStatusSummary();
+        renderAppHealth();
         renderDashboard();
         if (!saving) renderServices();
       } catch (error) { setStatusOffline(error.message === '请求超时，请稍后重试' ? '代理响应超时' : '代理未连接'); }
@@ -106,6 +107,16 @@
     }
     const ready = statusData.responses_ready === false ? 'Responses 不可用' : 'Responses 可用';
     summary.textContent = ready + ' · Responses 推荐 ' + (recommendationLabel(statusData,'responses') || '—') + ' · Chat 推荐 ' + (recommendationLabel(statusData,'chat') || '—') + (statusData.instance_id ? ' · 实例 ' + statusData.instance_id : '');
+  }
+  function renderAppHealth() {
+    setText('app-version', 'v' + (statusData.version || '—'));
+    const box = $('app-notice'); if (!box) return;
+    const restart = statusData.app_restart_required === true;
+    box.hidden = !restart;
+    if (!restart) return;
+    setText('app-notice-title', 'App 已更新，需要重启');
+    setText('app-notice-body', '磁盘上的 App 构建于 ' + (statusData.app_build_time || '未知时间')
+      + '，当前进程仍在运行旧代码；请退出并重新打开 Model Router，再在 Codex 里重试。');
   }
   function codexModeLabel(mode) { return mode === 'fastest' ? '自动择快' : mode === 'mapped' ? '模型映射' : '未开启'; }
   function renderCodexUsageStatus() {
@@ -275,7 +286,22 @@
   $('stop-codex').onclick=stopCodex;
   $('stop-codex-mapped').onclick=stopCodex;
   function formatTokens(v){const n=Number(v||0);return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);}
-  function renderLogs(items){$('log-list').innerHTML=items.length?items.map(i=>'<div class="log-row"><span class="log-time">'+esc(i.time)+'</span><span class="log-model">'+esc(i.model)+'</span><span class="log-detail">'+esc(i.endpoint)+'</span><span>'+(i.ok?'<span class="log-ok">成功 '+i.status_code+'</span>':'<span class="log-fail">失败 '+i.status_code+'</span>')+'</span><span class="log-meta">'+Number(i.latency||0).toFixed(2)+'s</span></div>').join(''):'<div class="empty">暂无请求记录</div>';}
+  function renderLogs(items) {
+    const list = $('log-list');
+    if (!items.length) { list.innerHTML = '<div class="empty">暂无请求记录</div>'; return; }
+    list.innerHTML = items.map(i => {
+      const status = i.ok ? '<span class="log-ok">成功 ' + esc(i.status_code) + '</span>'
+                          : '<span class="log-fail">失败 ' + esc(i.status_code) + '</span>';
+      const hint = i.hint ? '<div class="log-hint">' + esc(i.hint) + '</div>' : '';
+      return '<div class="log-entry"><div class="log-row">'
+        + '<span class="log-time">' + esc(i.time) + '</span>'
+        + '<span class="log-model">' + esc(i.model) + '</span>'
+        + '<span class="log-detail">' + esc(i.endpoint) + '</span>'
+        + '<span>' + status + '</span>'
+        + '<span class="log-meta">' + Number(i.latency || 0).toFixed(2) + 's</span>'
+        + '</div>' + hint + '</div>';
+    }).join('');
+  }
   async function refreshLogs(){try{const r=await jsonFetch('/v1/logs?limit=100');renderLogs(r.logs||[]);$('logs-updated').textContent='更新于 '+new Date().toLocaleTimeString();}catch(e){$('logs-updated').textContent='日志离线：'+e.message;$('logs-updated').className='muted status-stale';}}
   function renderStats(d){const total=Number(d.total_requests||0),ok=Number(d.success_requests||0);$('stat-total').textContent=total;$('stat-success').textContent=(total?Math.round(ok*100/total):0)+'%';$('stat-latency').textContent=Number(d.avg_latency||0).toFixed(2)+'s';$('stat-tokens').textContent=formatTokens(Number(d.total_input_tokens||0)+Number(d.total_output_tokens||0));$('stat-token-detail').textContent='输入 '+formatTokens(d.total_input_tokens)+' · 输出 '+formatTokens(d.total_output_tokens);$('stats-updated').textContent='更新于 '+new Date().toLocaleTimeString();}
   async function refreshStats(){try{renderStats(await jsonFetch('/v1/stats'));}catch(e){$('stats-updated').textContent='统计离线：'+e.message;$('stats-updated').className='muted status-stale';}}

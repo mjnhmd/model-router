@@ -1033,3 +1033,96 @@ def test_config_update_leaves_only_one_bench_loop(tmp_path):
     assert response.status_code == 200
     assert old_loop.done()
     assert count == 1
+
+
+def test_status_reports_version_and_flags_replaced_app_bundle(tmp_path, monkeypatch):
+    from model_router import api as api_module
+
+    config = Config(
+        services=[
+            {
+                "name": "svc",
+                "base_url": "http://svc/v1",
+                "api_key": "k",
+                "models": [{"name": "gpt"}],
+            }
+        ]
+    )
+    app = create_app(config, state_file=tmp_path / "state.yaml")
+
+    async def status_payload() -> dict:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://router"
+        ) as client:
+            response = await client.get("/v1/status")
+        return response.json()
+
+    fresh = asyncio.run(status_payload())
+    assert fresh["version"] == api_module.CURRENT_VERSION
+    assert fresh["app_build_time"] == ""
+    assert fresh["app_restart_required"] is False
+
+    # 模拟“磁盘上的 App 在进程启动后被替换”：运行中的进程仍是旧代码。
+    monkeypatch.setattr(
+        api_module, "_app_build_time", lambda: api_module._PROCESS_STARTED_AT + 60
+    )
+    stale = asyncio.run(status_payload())
+    assert stale["app_restart_required"] is True
+    assert stale["app_build_time"]
+
+    asyncio.run(app.state.router.close())
+
+
+def test_logs_explain_upstream_official_client_rejection(tmp_path):
+    config = Config(
+        services=[
+            {
+                "name": "relay",
+                "base_url": "http://relay/v1",
+                "api_key": "k",
+                "models": [{"name": "gpt"}],
+            }
+        ]
+    )
+    app = create_app(config, state_file=tmp_path / "state.yaml")
+    rejection = {
+        "error": {
+            "message": "This account only allows Codex official clients",
+            "type": "forbidden_error",
+        }
+    }
+
+    async def run():
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, json=rejection, request=request)
+
+        app.state.router.upstreams["relay"]._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://relay/v1"
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://router"
+        ) as client:
+            anonymous = await client.post(
+                "/v1/responses", json={"model": "route-fastest", "input": "hi"}
+            )
+            identified = await client.post(
+                "/v1/responses",
+                json={"model": "route-fastest", "input": "hi"},
+                headers={
+                    "originator": "Codex Desktop",
+                    "user-agent": "Codex Desktop/0.153.4 (Mac OS; arm64)",
+                },
+            )
+            logs = (await client.get("/v1/logs")).json()["logs"]
+        await app.state.router.close()
+        return anonymous, identified, logs
+
+    anonymous, identified, logs = asyncio.run(run())
+
+    assert anonymous.status_code == 403 and identified.status_code == 403
+    # 上游响应原样透传，只在本机日志里补上可执行说明
+    assert anonymous.json()["error"]["type"] == "forbidden_error"
+    assert all(entry["error"] == "upstream_status_403" for entry in logs)
+    hints = [entry["hint"] for entry in logs]
+    assert any("没有携带 Codex 客户端标识" in hint for hint in hints)
+    assert any("已带 Codex 标识仍被拒" in hint for hint in hints)

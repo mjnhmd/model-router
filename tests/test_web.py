@@ -108,3 +108,36 @@ def test_workbench_exposes_explicit_mode_lifecycle_controls():
     console = CONSOLE.read_text(encoding="utf-8")
     for marker in ('startMode', 'stopCodex', 'codex-use-status', 'codex_usage_mode'):
         assert marker in console, marker
+
+
+def test_workbench_surfaces_app_version_and_stale_bundle_warning():
+    html = WEB.read_text(encoding="utf-8")
+    for marker in (
+        'id="app-version"',
+        'id="app-notice"',
+        'id="app-notice-title"',
+        'id="app-notice-body"',
+        "App 已更新，需要重启",
+        "app-version",
+    ):
+        assert marker in html, marker
+
+    console = CONSOLE.read_text(encoding="utf-8")
+    for marker in (
+        "renderAppHealth",
+        "app_restart_required",
+        "app_build_time",
+        "setText('app-version'",
+        "退出并重新打开 Model Router",
+    ):
+        assert marker in console, marker
+
+
+def test_request_log_shows_upstream_rejection_hint():
+    console = CONSOLE.read_text(encoding="utf-8")
+    html = WEB.read_text(encoding="utf-8")
+
+    assert "i.hint ?" in console
+    assert 'class="log-hint"' in console
+    assert ".log-hint{" in html
+    assert ".log-entry{" in html

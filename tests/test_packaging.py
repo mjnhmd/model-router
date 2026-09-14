@@ -36,3 +36,17 @@ def test_wheel_declares_embedded_console_resources():
     assert force_include["web"] == "model_router/web"
     api = (ROOT / "src/model_router/api.py").read_text(encoding="utf-8")
     assert "Path(__file__).resolve().parent / \"web\"" in api
+
+
+def test_package_version_fallback_matches_project_metadata():
+    import model_router
+
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    spec = (ROOT / "ModelRouter.spec").read_text(encoding="utf-8")
+
+    assert model_router.__version__ == metadata["project"]["version"]
+    # 打包 App 没有发行元数据，必须回落到包内版本，否则界面显示 0.0.0
+    assert '"desktop_entry.py"' in spec
+    from model_router import api
+
+    assert api.CURRENT_VERSION == metadata["project"]["version"]
